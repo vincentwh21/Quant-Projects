@@ -1,0 +1,571 @@
+---
+title: "Proj coding"
+output: html_document
+date: "2025-06-20"
+---
+#Import library
+```{r setup, include=FALSE}
+# Required Libraries
+library(shiny)
+library(shinythemes)
+library(shinyMatrix)
+library(quantmod)
+library(RiskPortfolios)
+library(factoextra)
+library(dendextend)
+library(cluster)
+library(RColorBrewer)
+library(shinybusy)
+library(PerformanceAnalytics)
+```
+
+# Import data and reformat
+```{r cars}
+csv_data <- read.csv("C:/Users/vince/Documents/University File/Year 4 Spring/STA320/All stocks data/S&P 500 Index and 20 chosen stocks.csv")
+rf <- read.csv("C:/Users/vince/Documents/University File/Year 4 Spring/STA320/r_f.csv")
+csv_xts <- xts(csv_data[,-1], order.by = as.Date(csv_data[,1], format = "%m/%d/%Y"))  # 转换为xts格式
+rf <- xts(rf[,-1], order.by = as.Date(rf[,1], format = "%m/%d/%Y"))/100 #Decimal form
+```
+
+# Step 1: Specify Ticklers and Frequency
+```{r}
+# Hardcoded tickers you want to analyze
+tickers <- c("nvda", "tsla", "avgo", "amzn", "meta", "aapl", "msft", "bsx", "goog")
+#Use tickers <- setdiff(colnames(data_xts), sp500_name) if you want to include all
+
+# Step 2: Gather and Process Data
+# Filter tickers that exist in the data
+tickers <- tickers[tickers %in% colnames(csv_xts)]
+
+# Helper function to compute returns based on frequency
+compute_returns <- function(price_data, frequency) {
+  switch(frequency,
+         "daily" = dailyReturn(price_data),
+         "weekly" = {price_data <- price_data[.indexwday(price_data) == 5]
+         weeklyReturn(price_data)},
+         "monthly" = monthlyReturn(price_data, leading = FALSE),
+         "quarterly" = quarterlyReturn(price_data, leading = FALSE),
+         "annual" = annualReturn(price_data, leading = FALSE),
+         stop("Invalid frequency"))
+}
+
+
+# Create a list to store return data
+returns_list <- list()
+return_frequency <- "daily"
+# Get returns for each ticker
+for (ticker in tickers) {
+  asset_returns <- compute_returns(csv_xts[, ticker, drop = FALSE], return_frequency)
+  returns_list[[ticker]] <- asset_returns
+}
+
+# Merge all returns into a single data frame and remove rows with NA values
+return_matrix <- na.omit(do.call("merge.xts", returns_list))
+
+# Set the column names to the ticker names
+colnames(return_matrix) <- tickers
+
+transposed_xts <- t(return_matrix)
+
+benchmark_return <- compute_returns(csv_xts[, "sp500", drop = FALSE], return_frequency)
+colnames(benchmark_return) <- "Benchmark"
+```
+
+## Sharpe Ratio
+```{r}
+compounded_rf <- function(rf_decimal, return_frequency) {
+  # Conditional conversion based on return_frequency with compounding (without -1)
+  if (return_frequency == "daily") {
+    rf_daily <- (1 + rf_decimal)^(1/252) - 1 # Compounding daily
+    return(rf_daily)
+  
+  } else if (return_frequency == "weekly") {
+    rf_weekly <- (1 + rf_decimal)^(1/52) - 1  # Compounding weekly
+    return(rf_weekly)
+  
+  } else if (return_frequency == "monthly") {
+    rf_monthly <- (1 + rf_decimal)^(1/12) - 1  # Compounding monthly
+    return(rf_monthly)
+  
+  } else if (return_frequency == "quarterly") {
+    rf_quarterly <- (1 + rf_decimal)^(1/4) - 1  # Compounding quarterly
+    return(rf_quarterly)
+  
+  } else if (return_frequency == "annually") {
+    return(rf_decimal)  # No compounding for annually
+  } else {
+    stop("Invalid return frequency. Choose from 'daily', 'weekly', 'monthly', 'quarterly', or 'annually'.")
+  }
+}
+converted_rf <- compounded_rf(rf, return_frequency)
+colnames(converted_rf) <- "rf"
+library(PerformanceAnalytics)
+library(ggplot2)
+
+# 1. Calculate annualized Sharpe ratios (aligned with your mean returns workflow)
+sharpe_ratios <- SharpeRatio.annualized(
+  R = return_matrix,
+  Rf = converted_rf,
+  scale = switch(return_frequency,
+                "daily" = 252,
+                "weekly" = 52,
+                "monthly" = 12,
+                "quarterly" = 4,
+                "annually" = 1),
+  geometric = FALSE
+)
+
+# 2. Prepare data for plotting (consistent with mean returns format)
+sharpe_df <- data.frame(
+  Ticker = colnames(return_matrix),
+  Sharpe = round(as.numeric(sharpe_ratios), 2),  # Rounded to 2 decimals
+  stringsAsFactors = FALSE
+)
+
+# 3. Create barplot (mirroring mean returns visualization)
+ggplot(sharpe_df, aes(x = reorder(Ticker, -Sharpe), y = Sharpe, 
+                      fill = ifelse(Sharpe > 0, "Positive", "Negative"))) +
+  geom_col() +
+  geom_text(aes(label = sprintf("%.2f", Sharpe)),  # No % sign for Sharpe
+            vjust = -0.5, 
+            size = 3.5) +
+  scale_fill_manual(values = c("Positive" = "#1a9850", "Negative" = "#d73027")) +
+  labs(
+    title = "Annualized Sharpe Ratios by Stock",
+    subtitle = paste("Risk-free rate:", return_frequency, "compounding"),
+    x = "Stock ticker",
+    y = "Sharpe Ratio"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "none",  # Remove legend
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+## Mean
+```{r}
+library(ggplot2)
+library(PerformanceAnalytics)  # For handling xts objects
+
+# 1. Calculate mean returns and convert to percentages
+mean_returns <- colMeans(return_matrix, na.rm = TRUE) * 100
+returns_df <- data.frame(
+  Ticker = names(mean_returns),
+  Return = round(mean_returns, 2),
+  stringsAsFactors = FALSE
+)
+
+# 2. Create the plot
+ggplot(returns_df, aes(x = reorder(Ticker, -Return), y = Return)) +
+  geom_col(fill = "#1f77b4") +  # Consistent blue color for all bars
+  geom_text(aes(label = sprintf("%.2f%%", Return)),  # 2 decimal places
+            vjust = -0.5, 
+            size = 3.5) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +  # Auto-add %
+  labs(
+    title = "Average Returns by Stock",
+    x = "Stock ticker",
+    y = "Return (%)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    panel.grid.major.x = element_blank()
+  )
+```
+
+## Heatmap
+```{r}
+library(ggcorrplot)
+cor_matrix <- cor(return_matrix[, tickers])
+ggcorrplot(
+  cor_matrix,
+  hc.order = TRUE,
+  type = "lower",
+  outline.color = "white",
+  ggtheme = ggplot2::theme_minimal(),
+  colors = c("#6D9EC1", "white", "#E46726"),
+  lab = TRUE,
+  lab_size = 3,
+  title = "Stock Return Correlations"
+)
+```
+
+
+# Step 2: Estimate Optimal Linkage Method
+```{r}
+# Define linkage methods
+m <- c("single", "average", "complete", "ward")
+names(m) <- c("average", "single", "complete", "ward")
+
+# Function to compute agglomerative coefficient
+ac <- function(x) {
+  agnes(transposed_xts, method = x)$ac
+}
+
+# Calculate agglomerative coefficient for each clustering linkage method
+ac_values <- sapply(m, ac)
+
+# Find the method with the highest agglomerative coefficient
+best_method <- names(which.max(ac_values))
+```
+
+# Step 3) Estimating the optimal number of clusters
+```{r}
+# Define your clustering function
+mycluster <- function(x, k) {
+  d <- dist(x)
+  hc <- hclust(d, method = best_method) # specify the method here
+  cutree(hc, k = k)
+}
+
+# Set your parameters directly (equivalent to what would come from UI)
+specify_clusters <- TRUE  # Set to TRUE if you want to specify cluster range
+min_clusters <- 2         # Only used if specify_clusters = TRUE
+max_clusters <- 19        # Only used if specify_clusters = TRUE
+
+# Cluster selection logic (non-UI version)
+if (specify_clusters) {
+  
+  # Check if minimum clusters is larger than number of tickers - 1
+  if (min_clusters > (nrow(transposed_xts) - 1)) {
+    stop("The minimum number of clusters must be less than the number of tickers.")
+  }
+  
+  # Check if maximum clusters is larger than number of tickers - 1
+  if (max_clusters > nrow(transposed_xts) - 1) {
+    max_clusters <- nrow(transposed_xts) - 1
+  }
+  
+  # Initialize a vector to store silhouette results
+  sil_width <- numeric(max_clusters)
+  
+  # Compute the silhouette width for each number of clusters
+  for (k in min_clusters:max_clusters) {
+    cluster_assignments <- mycluster(transposed_xts, k)
+    sil_results <- silhouette(cluster_assignments, dist(transposed_xts))
+    sil_width[k] <- mean(sil_results[, 3]) # average silhouette width
+  }
+  
+  # Find optimal number of clusters
+  optimal_k <- which.max(sil_width)
+  
+} else {
+  
+  # Automatic cluster determination
+  if(length(tickers) == 2) {
+    optimal_k <- 2
+  } else {
+    max_clusters <- nrow(transposed_xts) - 1
+    sil_width <- numeric(max_clusters)
+    
+    for (k in 2:max_clusters) {
+      cluster_assignments <- mycluster(transposed_xts, k)
+      sil_results <- silhouette(cluster_assignments, dist(transposed_xts))
+      sil_width[k] <- mean(sil_results[, 3])
+    }
+    
+    optimal_k <- which.max(sil_width)
+  }
+}
+
+# Print the result
+cat("Optimal number of clusters:", optimal_k, "\n")
+```
+
+# Step 4: Estimate Inter-Cluster Weights
+```{r}
+inter_cluster_weighting <- "risk"  # Can be "risk" or "equally"
+# Compute distance matrix
+d <- dist(transposed_xts)
+
+# Perform hierarchical clustering using Ward's method
+final_clust <- hclust(d, method = best_method)
+
+# Cut the dendrogram into optimal_k clusters
+groups <- cutree(final_clust, k=optimal_k)
+
+# Split the data by cluster assignments
+clustered_data <- split(row.names(transposed_xts), groups)
+
+# Convert hclust object (final_clust) to a dendrogram object
+dend <- as.dendrogram(final_clust)
+
+# Color branches by cluster and labels by their original order
+if(optimal_k > 1) {
+  dend <- color_branches(dend, k = optimal_k)
+  dend <- color_labels(dend, k = optimal_k)
+}
+
+# Modify the dendrogram
+dend <- hang.dendrogram(dend)
+dend <- set(dend, "labels_cex", 1.25)  # Change the size of the labels
+dend <- set(dend, "branches_lwd", 4)  # Change the width of the branches
+dend <- set(dend, "branches_lty", 1)  # Change the line type of the branches
+
+get_cluster_members <- function(node, dendrogram_structure) {
+  if (node < 0) {
+    return(-node)
+  } else {
+    left_members <- get_cluster_members(dendrogram_structure[node, 1], dendrogram_structure)
+    right_members <- get_cluster_members(dendrogram_structure[node, 2], dendrogram_structure)
+    return(c(left_members, right_members))
+  }
+}
+
+if (inter_cluster_weighting == "risk") {
+  risk_contrib <- apply(return_matrix, 2, sd)
+} else if (inter_cluster_weighting == "equally") {
+  risk_contrib <- apply(return_matrix, 2, sd)
+  asset_names <- names(risk_contrib)
+  risk_contrib <- rep(1, length(asset_names))
+  names(risk_contrib) <- asset_names
+} else {
+  stop("Invalid option for inter cluster weights")
+}
+
+cluster_weights <- c()
+cluster_members <- c()
+cluster_labels <- c()
+
+while (length(cluster_weights) < optimal_k) {
+  
+  if (length(cluster_weights) < 1) {
+    
+    # Get the children clusters
+    childs <- c()
+    childs <- final_clust$merge[nrow(final_clust$merge), ]
+    
+    rc_1 <- median(risk_contrib[get_cluster_members(childs[1], final_clust$merge)]) / (median(risk_contrib[get_cluster_members(childs[1], final_clust$merge)]) + median(risk_contrib[get_cluster_members(childs[2], final_clust$merge)]))
+    rc_2 <- 1-rc_1
+    
+    w_1 <- rc_2
+    w_2 <- rc_1
+    cluster_weights <- c(cluster_weights, w_1, w_2)
+    
+    m_1 <- get_cluster_members(childs[1], final_clust$merge)
+    m_2 <- get_cluster_members(childs[2], final_clust$merge)
+    cluster_members <- c(cluster_members, list(m_1), list(m_2))
+    
+    cluster_labels <- c(childs)
+    
+    old_max_row <- nrow(final_clust$merge)
+    new_max_row <- old_max_row - 1
+    
+  } else {
+    
+    col_num <- which(cluster_labels == new_max_row)
+    
+    childs <- c()
+    childs <- final_clust$merge[new_max_row, ]
+    
+    rc_1 <- median(risk_contrib[get_cluster_members(childs[1], final_clust$merge)]) / (median(risk_contrib[get_cluster_members(childs[1], final_clust$merge)]) + median(risk_contrib[get_cluster_members(childs[2], final_clust$merge)]))
+    rc_2 <- 1-rc_1
+    
+    m_1 <- get_cluster_members(childs[1], final_clust$merge)
+    m_2 <- get_cluster_members(childs[2], final_clust$merge)
+    
+    if (col_num == 1) {
+      
+      w_1 <- rc_2 * cluster_weights[1]  # calculate new w_1
+      w_2 <- cluster_weights[1] - w_1
+      cluster_weights <- c(w_1, w_2, cluster_weights[2:length(cluster_weights)])
+      
+      cluster_members <- c(list(m_1), list(m_2), cluster_members[2:length(cluster_members)])
+      
+      cluster_labels <- c(childs, cluster_labels[2:length(cluster_labels)])
+      
+    } else if (col_num == length(cluster_weights)) {
+      
+      w_1 <- rc_2 * cluster_weights[length(cluster_weights)]  # calculate new w_1
+      w_2 <- cluster_weights[length(cluster_weights)] - w_1
+      cluster_weights <- c(cluster_weights[1:(length(cluster_weights)-1)], w_1, w_2)
+      
+      cluster_members <- c(cluster_members[1:(length(cluster_members)-1)], list(m_1), list(m_2))
+      
+      cluster_labels <- c(cluster_labels[1:(length(cluster_labels)-1)], childs)
+      
+    } else {
+      
+      w_1 <- rc_2 * cluster_weights[col_num]  # calculate new w_1
+      w_2 <- cluster_weights[col_num] - w_1
+      cluster_weights <- c(cluster_weights[1:(length(cluster_weights)-1)], w_1, w_2, cluster_weights[(col_num + 1):length(cluster_weights)])
+      
+      cluster_members <- c(cluster_members[1:(length(cluster_members)-1)], list(m_1), list(m_2), cluster_members[(col_num + 1):length(cluster_members)])
+      
+      cluster_labels <- c(cluster_labels[1:(length(cluster_labels)-1)], childs, cluster_labels[(col_num + 1):length(cluster_labels)])
+      
+    }
+    
+    old_max_row <- new_max_row
+    new_max_row <- old_max_row - 1
+    
+    col_num <- 1
+    
+  }
+}
+```
+
+# Step 5: Estimate Intra-Cluster Weights
+```{r}
+# Set parameters
+intra_cluster_weighting <- "risk"  # "risk" or "equally"
+final_clust <- hclust(dist(t(return_matrix)), method = "ward.D2")  # Example
+
+# 1. Cluster assets and calculate weights
+groups <- cutree(final_clust, k = optimal_k)
+clustered_data <- split(row.names(t(return_matrix)), groups)
+
+# Calculate risk contributions
+if (intra_cluster_weighting == "risk") {
+  risk_contrib <- apply(return_matrix, 2, sd)
+} else if (intra_cluster_weighting == "equally") {
+  risk_contrib <- rep(1, ncol(return_matrix))
+  names(risk_contrib) <- colnames(return_matrix)
+} else {
+  stop("Invalid intra-cluster weighting option")
+}
+
+# Risk parity weighting function
+naive_risk_parity <- function(cluster, risk_contrib) {
+  inverse_risk <- 1 / risk_contrib[cluster]
+  inverse_risk / sum(inverse_risk)
+}
+
+# Calculate final weights (assuming cluster_members exists from previous steps)
+final_weights <- list()
+asset_clusters <- list()
+for(i in 1:length(cluster_members)){
+  cluster <- colnames(return_matrix)[unlist(cluster_members[[i]])]
+  nrp_weights <- naive_risk_parity(cluster, risk_contrib)
+  final_weights[[i]] <- nrp_weights * cluster_weights[i]
+  asset_clusters[[i]] <- rep(i, length(nrp_weights))
+}
+final_weights <- unlist(final_weights)
+asset_clusters <- unlist(asset_clusters)
+```
+
+# 2. Generate outputs
+```{r}
+# Portfolio weights table
+weights_table <- data.frame(
+  Ticker = names(final_weights),
+  Weight = final_weights,
+  Cluster = asset_clusters
+)
+print("Optimized Portfolio Weights:")
+print(weights_table[order(weights_table$Cluster, -weights_table$Weight), ])
+
+# Function to add weights to labels
+add_weight_labels <- function(dend, weights) {
+  # Get current labels
+  current_labels <- labels(dend)
+  
+  # Match weights to labels (ensure same order)
+  matched_weights <- weights[current_labels]
+  
+  # Create new labels with weights
+  new_labels <- paste0(current_labels, "\n", 
+                       sprintf("%.1f%%", matched_weights * 100))
+  
+  # Update labels
+  labels(dend) <- new_labels
+  
+  return(dend)
+}
+
+weighted_dend <- add_weight_labels(dend, final_weights)
+plot(weighted_dend, main = "Hierarchical Asset Structure with Weights", 
+     cex.main = 1.25, ylab = "Height", nodePar = list(lab.cex = 0.7))  # Adjust label size as needed
+
+# Pie chart
+pie_data <- data.frame(
+  labels = names(final_weights),
+  values = final_weights
+) |> 
+  dplyr::arrange(desc(values))
+
+pie_colors <- RColorBrewer::brewer.pal(nrow(pie_data), "Set1")
+pie(pie_data$values, 
+    labels = paste0(pie_data$labels, "\n", round(pie_data$values*100, 1), "%"),
+    col = pie_colors,
+    main = "Portfolio Allocation")
+
+# Cumulative returns plot
+weighted_returns <- return_matrix * final_weights
+portfolio_returns <- rowSums(weighted_returns)
+cumulative_portfolio <- cumprod(1 + portfolio_returns)
+cumulative_assets <- cumprod(1 + return_matrix)
+cumulative_rf <- cumprod(1 + converted_rf)
+cumulative_benchmark <- cumprod(1 + benchmark_return)
+```
+
+## Metric report
+```{r}
+all_returns <- cbind(return_matrix, Portfolio = portfolio_returns, Benchmark = benchmark_return)
+all_cumulative <- cbind(cumulative_assets, Portfolio = cumulative_portfolio, Benchmark = cumulative_benchmark)
+
+sharpe_ratio <- SharpeRatio.annualized(
+  R = all_returns,
+  Rf = converted_rf,
+  scale = switch(return_frequency,
+                "daily" = 252,
+                "weekly" = 52,
+                "monthly" = 12,
+                "quarterly" = 4,
+                "annually" = 1),
+  geometric = FALSE
+)
+total_return <- tail(all_cumulative, 1) - 1  # Total return in decimal (e.g., 0.50 = 50%)
+total_return_pct <- total_return * 100       # Convert to percentage (50%)
+
+n_days <- nrow(all_cumulative)  # Total number of days in the dataset
+annualized_return <- (1 + total_return)^(252 / n_days) - 1
+annualized_return_pct <- annualized_return * 100  # Convert to %
+
+annualized_volatility <- apply(all_returns* sqrt(252), 2, sd, na.rm = TRUE)
+
+results <- data.frame(
+  Ticker = colnames(all_cumulative),
+  Total_Return = as.numeric(total_return_pct),
+  Annualized_Return = as.numeric(annualized_return_pct),
+  annualized_volatility = as.numeric(annualized_volatility * 100)
+)
+
+# Identify numeric columns (excluding 'Ticker' which is character/factor)
+numeric_cols <- sapply(results, is.numeric)
+
+# Round all numeric columns to 2 decimal places
+results[numeric_cols] <- round(results[numeric_cols], 2)
+
+print(results)
+```
+
+
+
+```{r}
+# Convert to percentage change from initial investment (starting at 0%)
+portfolio_pct <- (cumulative_portfolio - 1) * 100
+benchmark_pct <- (cumulative_benchmark - 1) * 100
+
+# Create the plot
+plot(index(portfolio_pct), 
+     portfolio_pct, 
+     type = "l", 
+     lwd = 2,
+     col = "darkgreen",
+     ylim = range(c(portfolio_pct, benchmark_pct), na.rm = TRUE),
+     main = "Portfolio vs Benchmark: Percentage Growth",
+     ylab = "Percentage Return (%)",
+     xlab = "Date")
+lines(index(portfolio_pct), benchmark_pct, col = "blue", lwd = 2)
+
+# Add zero baseline and grid
+abline(h = 0, col = "gray40", lty = 2)
+grid(col = "gray80")
+```

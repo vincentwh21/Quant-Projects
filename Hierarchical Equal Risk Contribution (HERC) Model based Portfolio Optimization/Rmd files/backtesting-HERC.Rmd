@@ -1,0 +1,142 @@
+---
+title: "backtesting-HERC"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE)
+```
+
+```{r}
+library(xts)
+library(cluster)
+library(dendextend)
+library(PerformanceAnalytics)
+library(RColorBrewer)
+library(ggplot2)
+library(scales)
+
+data <- read.csv("S&P 500 Index and 20 chosen stocks.csv", stringsAsFactors = FALSE)
+data_xts <- xts(data[,-1], order.by = as.Date(data[,1]))
+
+sp500_name <- "sp500"
+tickers <- setdiff(colnames(data_xts), sp500_name)
+returns <- na.omit(Return.calculate(data_xts, method = "log"))
+```
+
+```{r}
+train_returns <- returns[index(returns) >= as.Date("2022-01-01") & index(returns) < as.Date("2024-05-21"),]
+test_returns <- returns[index(returns) >= as.Date("2024-05-21") & index(returns) <= as.Date("2025-05-20"), ]
+```
+
+```{r}
+returns_t <- t(train_returns[, tickers])
+
+linkage_methods <- list(
+  average = c(agnes = "average", hclust = "average"),
+  single = c(agnes = "single", hclust = "single"),
+  complete = c(agnes = "complete", hclust = "complete"),
+  ward = c(agnes = "ward", hclust = "ward.D")
+)
+
+get_ac <- function(m) agnes(returns_t, method = linkage_methods[[m]][["agnes"]])$ac
+ac_values <- sapply(names(linkage_methods), get_ac)
+best_method <- names(which.max(ac_values))
+best_hclust_method <- linkage_methods[[best_method]][["hclust"]]
+
+# 自动确定聚类数
+min_k <- 2
+max_k <- min(10, nrow(returns_t) - 1)
+sil_widths <- numeric(max_k)
+for(k in min_k:max_k) {
+  d <- dist(returns_t)
+  hc <- hclust(d, method = best_hclust_method)
+  clusters <- cutree(hc, k = k)
+  sil <- silhouette(clusters, dist(returns_t))
+  sil_widths[k] <- mean(sil[,3])
+}
+optimal_k <- which.max(sil_widths)
+
+# 计算风险贡献
+asset_risk <- apply(train_returns[, tickers], 2, sd)
+
+d <- dist(returns_t)
+final_hc <- hclust(d, method = best_hclust_method)
+groups <- cutree(final_hc, k = optimal_k)
+clustered_assets <- split(names(groups), groups)
+cluster_risk_medians <- sapply(clustered_assets, function(assets) median(asset_risk[assets]))
+cluster_weights <- 1 / cluster_risk_medians
+cluster_weights <- cluster_weights / sum(cluster_weights)
+
+naive_risk_parity <- function(cluster_assets, asset_risks) {
+  inv_risks <- 1 / asset_risks[cluster_assets]
+  inv_risks / sum(inv_risks)
+}
+intra_weights <- lapply(clustered_assets, naive_risk_parity, asset_risks = asset_risk)
+
+final_weights <- rep(0, length(tickers))
+names(final_weights) <- tickers
+for(i in seq_along(clustered_assets)) {
+  assets <- clustered_assets[[i]]
+  weights_intra <- intra_weights[[i]]
+  weights_cluster <- cluster_weights[i]
+  final_weights[assets] <- weights_intra * weights_cluster
+}
+final_weights <- final_weights / sum(final_weights)
+```
+
+```{r}
+portfolio_returns_test <- test_returns[, tickers] %*% final_weights
+colnames(portfolio_returns_test) <- "Portfolio"
+
+test_compare <- merge.xts(
+  xts(portfolio_returns_test, order.by = index(test_returns)),
+  test_returns[, "sp500"]
+)
+
+colnames(test_compare) <- c("Portfolio", "sp500")
+
+cum_returns <- cumprod(1 + test_compare) - 1
+excess_returns <- xts(test_compare[, "Portfolio"] - test_compare[, "sp500"], order.by = index(test_compare))
+colnames(excess_returns) <- "ExcessReturn"
+
+# 读取无风险收益率
+rf_data <- read.csv("rf.csv", stringsAsFactors = FALSE)
+rf_xts <- xts(rf_data$daily, order.by = as.Date(rf_data$Date, format = "%m/%d/%Y"))
+colnames(rf_xts) <- "rf"
+
+# 计算累计无风险收益
+cum_rf <- cumprod(1 + rf_xts) - 1
+
+# 合并组合、S&P500、无风险收益
+cum_plot_data <- merge.xts(cum_returns, cum_rf)
+colnames(cum_plot_data)[3] <- "RiskFree"
+```
+
+```{r}
+# Plot cumulative returns including Risk-Free line
+plot.xts(cum_plot_data,
+         main = "Portfolio vs S&P 500 vs Risk-Free (HERC)",
+         ylab = "Cumulative Return",
+         col = c("blue", "red", "darkgray"),
+         legend.loc = "topleft",
+         lwd = 2,
+         major.ticks = "months",
+         grid.ticks.on = "months")
+
+# Plot cumulative excess returns (Portfolio - S&P 500)
+plot.xts(cumsum(excess_returns),
+         main = "Cumulative Excess Return (Portfolio - S&P 500)",
+         ylab = "Cumulative Excess Return",
+         col = "darkgreen",
+         lwd = 2,
+         major.ticks = "months",
+         grid.ticks.on = "months")
+abline(h = 0, col = "black", lty = 2)
+
+# Information Ratio
+InformationRatio(test_compare[, "Portfolio"], test_compare[, "sp500"])
+```
+
+
+

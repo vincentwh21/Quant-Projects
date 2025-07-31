@@ -1,0 +1,119 @@
+---
+title: "backetestin-Markowitz"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE)
+```
+
+```{r}
+library(xts)
+library(cluster)
+library(dendextend)
+library(PerformanceAnalytics)
+library(RColorBrewer)
+library(ggplot2)
+library(scales)
+
+data <- read.csv("S&P 500 Index and 20 chosen stocks.csv", stringsAsFactors = FALSE)
+data_xts <- xts(data[,-1], order.by = as.Date(data[,1]))
+
+sp500_name <- "sp500"
+tickers <- setdiff(colnames(data_xts), sp500_name)
+returns <- na.omit(Return.calculate(data_xts, method = "log"))
+```
+
+```{r}
+train_returns <- returns[index(returns) >= as.Date("2022-01-01") & index(returns) < as.Date("2024-05-21"),]
+test_returns <- returns[index(returns) >= as.Date("2024-05-21") & index(returns) <= as.Date("2025-05-20"), ]
+```
+
+```{r}
+library(quadprog)
+
+mean_returns <- colMeans(train_returns[, tickers])
+cov_mat <- cov(train_returns[, tickers])
+
+# 正则化协方差矩阵（防止奇异）
+lambda <- 1e-4
+cov_mat_reg <- cov_mat + diag(lambda, ncol(cov_mat))
+
+Dmat <- 2 * cov_mat_reg
+dvec <- rep(0, length(tickers))
+
+# 目标收益设为训练集均值收益的30%分位数
+target_return <- quantile(mean_returns, 0.3)
+
+n <- length(tickers)
+Amat <- cbind(
+  rep(1, n),        # 权重和=1
+  mean_returns,     # 期望收益 >= 目标收益
+  diag(n)           # 权重 >= 0
+)
+bvec <- c(1, target_return, rep(0, n))
+meq <- 1  
+
+sol <- solve.QP(Dmat, dvec, Amat, bvec, meq)
+weights <- sol$solution
+weights <- weights / sum(weights)
+names(weights) <- tickers
+```
+
+```{r}
+# 测试集计算投资组合收益
+portfolio_returns_test <- test_returns[, tickers] %*% weights
+colnames(portfolio_returns_test) <- "Portfolio"
+
+test_compare <- merge.xts(
+  xts(portfolio_returns_test, order.by = index(test_returns)),
+  test_returns[, sp500_name]
+)
+colnames(test_compare) <- c("Portfolio", "sp500")
+
+cum_returns <- cumprod(1 + test_compare) - 1
+excess_returns <- xts(test_compare[, "Portfolio"] - test_compare[, "sp500"], order.by = index(test_compare))
+colnames(excess_returns) <- "ExcessReturn"
+
+# 读取无风险收益率
+rf_data <- read.csv("rf.csv", stringsAsFactors = FALSE)
+rf_xts <- xts(rf_data$daily, order.by = as.Date(rf_data$Date, format = "%m/%d/%Y"))
+colnames(rf_xts) <- "rf"
+
+# 计算累计无风险收益
+cum_rf <- cumprod(1 + rf_xts) - 1
+
+# 合并组合、S&P500、无风险收益
+cum_plot_data <- merge.xts(cum_returns, cum_rf)
+colnames(cum_plot_data)[3] <- "RiskFree"
+
+```
+
+```{r}
+# 画累计收益曲线
+# Plot cumulative returns including Risk-Free line
+plot.xts(cum_plot_data,
+         main = "Portfolio vs S&P 500 vs Risk-Free (Markowitz)",
+         ylab = "Cumulative Return",
+         col = c("blue", "red", "darkgray"),
+         legend.loc = "topleft",
+         lwd = 2,
+         major.ticks = "months",
+         grid.ticks.on = "months")
+
+
+# 画超额收益累积曲线
+plot.xts(cumsum(excess_returns),
+         main = "Cumulative Excess Return (Portfolio - S&P 500)",
+         ylab = "Cumulative Excess Return",
+         col = "darkgreen",
+         lwd = 2,
+         major.ticks = "months",
+         grid.ticks.on = "months")
+abline(h = 0, col = "black", lty = 2)
+
+# 计算信息比率
+ir <- InformationRatio(test_compare[, "Portfolio"], test_compare[, "sp500"])
+print(paste("Information Ratio:", round(ir, 4)))
+
+```
